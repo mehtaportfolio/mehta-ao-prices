@@ -10,13 +10,13 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 app.use(express.json());
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3001';
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
 app.use(cors({
     origin: FRONTEND_URL.split(','),
     credentials: true
 }));
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 4000;
 const MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json";
 
 // Supabase Setup
