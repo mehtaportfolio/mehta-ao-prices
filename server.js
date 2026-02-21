@@ -315,6 +315,40 @@ cron.schedule('30 16 * * *', () => {
 });
 
 // Manual trigger for CMP sync
+// Manual trigger for refresh stocks
+app.get('/refresh-stocks', async (req, res) => {
+    try {
+        const result = await refreshStocks();
+        res.json({ 
+            status: "success",
+            message: `✅ Stock refresh completed: ${result.count} stocks processed`
+        });
+    } catch (error) {
+        res.status(500).json({
+            status: "error",
+            message: `❌ Stock refresh failed: ${error.message}`
+        });
+    }
+});
+
+// Manual trigger for CMP sync
+app.all(['/sync', '/sync-cmp'], async (req, res) => {
+    if (!isMarketOpen()) {
+        return res.status(400).json({ 
+            error: 'Market is closed',
+            message: 'CMP sync only works during market hours (9:15 AM - 3:30 PM IST, weekdays)',
+            marketOpen: false
+        });
+    }
+    try {
+        await syncPrices();
+        res.json({ status: 'success', message: '✅ CMP Sync completed successfully', marketOpen: true });
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: `❌ CMP Sync failed: ${error.message}` });
+    }
+});
+
+// Manual trigger for LCP sync
 app.all(['/sync-lcp'], async (req, res) => {
     const istTime = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     const hours = istTime.getHours();
@@ -330,9 +364,14 @@ app.all(['/sync-lcp'], async (req, res) => {
         });
     }
     
-    syncLCP();
-    res.json({ message: 'LCP Sync triggered in background', marketClosed: true });
+    try {
+        await syncLCP();
+        res.json({ status: 'success', message: '✅ LCP Sync completed successfully', marketClosed: true });
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: `❌ LCP Sync failed: ${error.message}` });
+    }
 });
+
 
 
 // Manual trigger for LCP sync
