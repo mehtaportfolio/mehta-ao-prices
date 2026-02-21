@@ -285,7 +285,7 @@ const login = async (totp) => {
 
 ### Service not starting
 - Check logs: `npm install` might be failing
-- Verify Node version: `.nvmrc` file should have `18.17.0`
+- Verify Node version: `.nvmrc` file should have `20.11.0` or higher
 
 ### Cron jobs not running
 - Ensure instance type is **Standard** (not Free)
