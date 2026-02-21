@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const axios = require('axios');
 const { SmartAPI } = require('smartapi-javascript');
 const { TOTP } = require('totp-generator');
 const cron = require('node-cron');
@@ -16,6 +17,7 @@ app.use(cors({
 }));
 
 const port = process.env.PORT || 3000;
+const MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json";
 
 // Supabase Setup
 const supabase = createClient(
@@ -28,6 +30,77 @@ let smartApi = new SmartAPI({
 });
 
 let sessionData = null;
+
+async function refreshStocks() {
+    try {
+        console.log("Downloading Angel One instrument master...");
+        const response = await axios.get(MASTER_URL, { timeout: 60000 });
+        const instruments = response.data;
+
+        console.log("Total instruments:", instruments.length);
+
+        const eqStocks = instruments.filter(item =>
+            (item.exch_seg === "NSE" || item.exch_seg === "BSE") &&
+            item.instrumenttype === "" &&
+            item.token &&
+            item.symbol &&
+            !/\d/.test(item.symbol)
+        );
+
+        console.log("Total EQ Stocks found:", eqStocks.length);
+
+        const { data: existingNSE, error: fetchError } = await supabase
+            .from('stock_symbols')
+            .select('name')
+            .eq('exchange', 'NSE');
+
+        if (fetchError) throw fetchError;
+
+        const nseNames = new Set(existingNSE?.map(s => s.name) || []);
+        console.log(`Found ${nseNames.size} existing NSE stocks`);
+
+        const nseStocks = eqStocks.filter(item => item.exch_seg === "NSE");
+        const nseNamesFromMaster = new Set(nseStocks.map(s => s.name));
+        const allNseNames = new Set([...nseNames, ...nseNamesFromMaster]);
+        
+        const bseStocks = eqStocks.filter(item => 
+            item.exch_seg === "BSE" && !allNseNames.has(item.name)
+        );
+
+        console.log(`Processing ${nseStocks.length} NSE stocks and ${bseStocks.length} BSE stocks (duplicates filtered)`);
+
+        const formatted = [...nseStocks, ...bseStocks].map(item => ({
+            symbol: item.symbol,
+            name: item.name,
+            exchange: item.exch_seg,
+            symbol_token: item.token
+        }));
+
+        const batchSize = 2000;
+        const promises = [];
+        
+        for (let i = 0; i < formatted.length; i += batchSize) {
+            const batch = formatted.slice(i, i + batchSize);
+            promises.push(
+                supabase
+                    .from('stock_symbols')
+                    .upsert(batch, { onConflict: 'symbol,exchange' })
+                    .then(({ error }) => {
+                        if (error) console.error(`Batch error:`, error.message);
+                    })
+            );
+        }
+
+        await Promise.all(promises);
+        console.log("✅ All batches processed.");
+        return { success: true, count: formatted.length };
+
+    } catch (error) {
+        console.error("❌ Error:", error.message || error);
+        console.error("Stack:", error.stack);
+        throw error;
+    }
+}
 
 function isMarketOpen() {
     const now = new Date();
@@ -336,6 +409,17 @@ app.get('/status', (req, res) => {
         lastLogin: sessionData ? new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }) : 'Never',
         marketOpen: isMarketOpen(),
         istTime: istTime.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })
+    });
+});
+
+app.get('/refresh-stocks', (req, res) => {
+    refreshStocks()
+        .then(result => console.log(`Refresh completed: ${result.count} stocks`))
+        .catch(error => console.error("Background refresh failed:", error.message));
+
+    res.json({ 
+        status: "Processing", 
+        message: "Stock refresh started in background. It will take a few seconds to complete." 
     });
 });
 
