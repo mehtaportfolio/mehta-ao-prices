@@ -14,7 +14,7 @@ Both should be deployed as separate Render Web Services.
 ### Service 1: server.js
 ```env
 PORT=3000
-FRONTEND_URL=https://your-frontend.vercel.app
+FRONTEND_URL=https://mehta-wealths-dashboard.vercel.app
 API_KEY=<Angel One API Key>
 CLIENT_ID=<Angel One Client ID>
 PASSWORD=<Angel One Password>
@@ -285,7 +285,7 @@ const login = async (totp) => {
 
 ### Service not starting
 - Check logs: `npm install` might be failing
-- Verify Node version: `.nvmrc` file should have `20.11.0` or higher
+- Verify Node version: `.nvmrc` file should have `18.17.0`
 
 ### Cron jobs not running
 - Ensure instance type is **Standard** (not Free)

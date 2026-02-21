@@ -13,7 +13,7 @@ app.use(cors({
     credentials: true
 }));
 
-const port = process.env.PORT || 3000;
+const port = process.env.SEARCH_PORT || 4000;
 
 // Supabase Setup
 const supabase = createClient(
