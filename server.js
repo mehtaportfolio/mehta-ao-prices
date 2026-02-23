@@ -18,6 +18,7 @@ app.use(cors({
 
 const port = process.env.PORT || 4000;
 const MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json";
+const PORTFOLIO_BACKEND_URL = process.env.PORTFOLIO_BACKEND_URL || "https://backend-bmmt.onrender.com";
 
 // Supabase Setup
 const supabase = createClient(
@@ -30,6 +31,23 @@ let smartApi = new SmartAPI({
 });
 
 let sessionData = null;
+
+async function notifyStatus(success, message) {
+    try {
+        const istTime = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+        console.log(`Sending notification to portfolio backend: ${success ? 'SUCCESS' : 'FAILURE'}`);
+        
+        await axios.post(`${PORTFOLIO_BACKEND_URL}/api/angel-one-status`, {
+            source: 'angel-one-backend',
+            success,
+            message,
+            timestamp: istTime,
+            authenticated: !!sessionData
+        }, { timeout: 10000 });
+    } catch (error) {
+        console.error('Failed to notify portfolio backend:', error.message);
+    }
+}
 
 async function refreshStocks() {
     try {
@@ -117,6 +135,8 @@ function isMarketOpen() {
     const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
     const isWithinHours = currentTime >= MARKET_OPEN && currentTime <= MARKET_CLOSE;
     
+    console.log(`Checking Market Status (IST): Day=${dayOfWeek}, Time=${hours}:${minutes}, isWeekday=${isWeekday}, isWithinHours=${isWithinHours}`);
+    
     return isWeekday && isWithinHours;
 }
 
@@ -132,10 +152,10 @@ async function login(totpInput) {
         
         if (data.status) {
             sessionData = data.data;
-            console.log('Login successful');
+            console.log('Login successful. Session updated.');
             return { success: true };
         } else {
-            console.error('Login failed:', data.message);
+            console.error('Login failed response:', JSON.stringify(data));
             return { success: false, message: data.message };
         }
     } catch (error) {
@@ -158,11 +178,13 @@ async function fetchMarketDataChunked(exchangeTokens) {
                     mode: "FULL",
                     exchangeTokens: { [exch]: chunk }
                 });
-                if (response.status && response.data.fetched) {
+                if (response.status && response.data && response.data.fetched) {
                     allFetchedData.push(...response.data.fetched);
+                } else {
+                    console.error(`API response error for ${exch}:`, response.message || 'Unknown error');
                 }
             } catch (err) {
-                console.error(`Error fetching chunk for ${exch}:`, err.message);
+                console.error(`Exception fetching chunk for ${exch}:`, err.message);
             }
         }
     }
@@ -176,8 +198,19 @@ async function syncPrices() {
     }
 
     if (!sessionData) {
-        console.log('Skipping sync: Not authenticated with Angel One.');
-        return;
+        console.log('Session missing in syncPrices. Attempting automated login...');
+        if (process.env.TOTP_SECRET) {
+            const loginResult = await login();
+            if (!loginResult.success) {
+                console.log('Automated login failed in syncPrices. Skipping sync.');
+                await notifyStatus(false, `Automated login failed during syncPrices: ${loginResult.message}`);
+                return;
+            }
+        } else {
+            console.log('Skipping sync: Not authenticated and no TOTP_SECRET.');
+            await notifyStatus(false, 'Session missing in syncPrices and no TOTP_SECRET available.');
+            return;
+        }
     }
 
     try {
@@ -201,34 +234,36 @@ async function syncPrices() {
         console.log(`Fetched ${fetchedData.length} records from API. Expected ~${symbols.length}.`);
 
         if (fetchedData.length > 0) {
-            // Update only cmp and last_updated columns
-            const BATCH_SIZE = 1000;
-            const promises = [];
+            const BATCH_SIZE = 500;
+            const now = new Date().toISOString();
             
             for (let i = 0; i < fetchedData.length; i += BATCH_SIZE) {
-                const batch = fetchedData.slice(i, i + BATCH_SIZE);
-                
-                batch.forEach(stock => {
-                    promises.push(
-                        supabase
-                            .from('stock_mapping')
-                            .update({
-                                cmp: stock.ltp,
-                                last_updated: new Date().toISOString()
-                            })
-                            .eq('symbol_ao', stock.tradingSymbol)
-                            .eq('symbol_token', stock.symbolToken)
-                            .eq('exchange', stock.exchange)
-                            .then(({ error }) => { if (error) console.error("Batch update error:", error.message); })
-                    );
-                });
+                const batch = fetchedData.slice(i, i + BATCH_SIZE).map(stock => ({
+                    symbol_ao: stock.tradingSymbol,
+                    symbol_token: stock.symbolToken,
+                    exchange: stock.exchange,
+                    cmp: stock.ltp,
+                    last_updated: now
+                }));
+
+                const { error } = await supabase
+                    .from('stock_mapping')
+                    .upsert(batch, { onConflict: 'symbol_ao,symbol_token,exchange' });
+
+                if (error) {
+                    console.error(`Batch sync error (CMP):`, error.message);
+                } else {
+                    console.log(`Processed CMP batch ${i / BATCH_SIZE + 1}`);
+                }
             }
-            
-            await Promise.all(promises);
             console.log(`CMP Sync complete. Updated ${fetchedData.length} symbols.`);
         }
     } catch (error) {
         console.error('Error during price sync:', error.message);
+        if (error.message.includes('Token expired') || error.errorcode === 'AG8001') {
+            console.log('Session expired during sync. Clearing sessionData.');
+            sessionData = null;
+        }
     }
 }
 
@@ -245,9 +280,15 @@ async function syncLCP() {
     }
 
     if (!sessionData) {
-        console.log('Skipping LCP sync: Not authenticated.');
-        await login();
-        if (!sessionData) return;
+        console.log('Session missing in syncLCP. Attempting automated login...');
+        if (process.env.TOTP_SECRET) {
+            await login();
+        }
+        
+        if (!sessionData) {
+            console.log('Skipping LCP sync: Not authenticated and no session.');
+            return;
+        }
     }
 
     try {
@@ -270,30 +311,28 @@ async function syncLCP() {
         const fetchedData = await fetchMarketDataChunked(exchangeTokens);
 
         if (fetchedData.length > 0) {
-            // Update only lcp and last_updated columns
-            const BATCH_SIZE = 1000;
-            const promises = [];
+            const BATCH_SIZE = 500;
+            const now = new Date().toISOString();
             
             for (let i = 0; i < fetchedData.length; i += BATCH_SIZE) {
-                const batch = fetchedData.slice(i, i + BATCH_SIZE);
-                
-                batch.forEach(stock => {
-                    promises.push(
-                        supabase
-                            .from('stock_mapping')
-                            .update({
-                                lcp: stock.close,
-                                last_updated: new Date().toISOString()
-                            })
-                            .eq('symbol_ao', stock.tradingSymbol)
-                            .eq('symbol_token', stock.symbolToken)
-                            .eq('exchange', stock.exchange)
-                            .then(({ error }) => { if (error) console.error("Batch LCP error:", error.message); })
-                    );
-                });
+                const batch = fetchedData.slice(i, i + BATCH_SIZE).map(stock => ({
+                    symbol_ao: stock.tradingSymbol,
+                    symbol_token: stock.symbolToken,
+                    exchange: stock.exchange,
+                    lcp: stock.close,
+                    last_updated: now
+                }));
+
+                const { error } = await supabase
+                    .from('stock_mapping')
+                    .upsert(batch, { onConflict: 'symbol_ao,symbol_token,exchange' });
+
+                if (error) {
+                    console.error(`Batch sync error (LCP):`, error.message);
+                } else {
+                    console.log(`Processed LCP batch ${i / BATCH_SIZE + 1}`);
+                }
             }
-            
-            await Promise.all(promises);
             console.log(`LCP Sync complete. Updated ${fetchedData.length} symbols.`);
         }
     } catch (error) {
@@ -303,15 +342,20 @@ async function syncLCP() {
 
 // Sync current prices (CMP) every 5 minutes (runs only during market hours)
 cron.schedule('*/5 * * * *', () => {
+    console.log(`Cron triggered at ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST`);
     if (isMarketOpen()) {
         syncPrices();
     }
+}, {
+    timezone: "Asia/Kolkata"
 });
 
 // Sync daily close (LCP) at 4:30 PM IST (16:30 is after 3:30 PM market close)
 cron.schedule('30 16 * * *', () => {
     console.log('Running daily LCP sync at 16:30 IST (after market close)...');
     syncLCP();
+}, {
+    timezone: "Asia/Kolkata"
 });
 
 // Manual trigger for CMP sync
@@ -480,18 +524,22 @@ app.get('/refresh-stocks', async (req, res) => {
 });
 
 
-// Daily session invalidation and re-login at 8:00 AM
+// Daily session invalidation and re-login at 8:00 AM IST
 cron.schedule('0 8 * * *', async () => {
-    console.log('Automated Daily Login at 8:00 AM...');
+    console.log('Automated Daily Login at 8:00 AM IST...');
     sessionData = null;
-    await login();
+    const result = await login();
+    await notifyStatus(result.success, result.success ? 'Daily automated login successful' : `Daily automated login failed: ${result.message}`);
+}, {
+    timezone: "Asia/Kolkata"
 });
 
 app.listen(port, async () => {
     console.log(`Server running at http://localhost:${port}`);
     if (process.env.TOTP_SECRET) {
         console.log('TOTP Secret found. Attempting initial automated login...');
-        await login();
+        const result = await login();
+        await notifyStatus(result.success, result.success ? 'Initial startup login successful' : `Initial startup login failed: ${result.message}`);
     } else {
         console.log('Waiting for manual TOTP login at /login endpoint...');
     }

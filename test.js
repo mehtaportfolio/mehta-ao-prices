@@ -24,8 +24,7 @@ async function testServer() {
             console.log(loginRes.data.message);
         }
 
-        console.log('\n--- Fetching LTP (NSE:SBIN-EQ, Token: 7603) ---');
-        const ltp = await axios.get('http://localhost:3000/ltp/NSE/7603');
+        const ltp = await axios.get('http://localhost:3000/ltp/BSE/99919000');
         console.log('LTP Result:', ltp.data);
 
     } catch (error) {
