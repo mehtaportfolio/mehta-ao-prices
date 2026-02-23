@@ -497,6 +497,19 @@ app.post('/login', async (req, res) => {
     }
 });
 
+// Health check for UptimeRobot
+app.get('/', (req, res) => {
+    res.status(200).json({
+        status: "ok",
+        service: "angel-one-backend",
+        time: new Date().toISOString()
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.status(200).send("OK");
+});
+
 app.get('/status', (req, res) => {
     const istTime = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
     res.json({
