@@ -123,21 +123,19 @@ async function refreshStocks() {
 function isMarketOpen() {
     const now = new Date();
     const istTime = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    
-    const dayOfWeek = istTime.getDay();
+
+    const day = istTime.getDay(); // 0=Sun, 6=Sat
     const hours = istTime.getHours();
     const minutes = istTime.getMinutes();
     const currentTime = hours * 60 + minutes;
-    
-    const MARKET_OPEN = 9 * 60 + 15;
-    const MARKET_CLOSE = 15 * 60 + 30;
-    
-    const isWeekday = dayOfWeek >= 1 && dayOfWeek <= 5;
-    const isWithinHours = currentTime >= MARKET_OPEN && currentTime <= MARKET_CLOSE;
-    
-    console.log(`Checking Market Status (IST): Day=${dayOfWeek}, Time=${hours}:${minutes}, isWeekday=${isWeekday}, isWithinHours=${isWithinHours}`);
-    
-    return isWeekday && isWithinHours;
+
+    const MARKET_OPEN = 9 * 60;       // 9:00 AM
+    const MARKET_CLOSE = 16 * 60; // 4:00 PM
+
+    const isWeekday = day >= 1 && day <= 5;
+    const isWithinTime = currentTime >= MARKET_OPEN && currentTime <= MARKET_CLOSE;
+
+    return isWeekday && isWithinTime;
 }
 
 async function login(totpInput) {
@@ -395,24 +393,36 @@ app.all(['/sync', '/sync-cmp'], async (req, res) => {
 // Manual trigger for LCP sync
 app.all(['/sync-lcp'], async (req, res) => {
     const istTime = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+
+    const day = istTime.getDay();
     const hours = istTime.getHours();
     const minutes = istTime.getMinutes();
     const currentTime = hours * 60 + minutes;
-    const MARKET_CLOSE = 15 * 60 + 30;
-    
-    if (currentTime < MARKET_CLOSE) {
+
+    const MARKET_CLOSE = 16 * 60;
+
+    const isWeekday = day >= 1 && day <= 5;
+
+    if (!isWeekday || currentTime < MARKET_CLOSE) {
         return res.status(400).json({ 
-            error: 'Market still open',
-            message: 'LCP sync runs after market close (3:30 PM IST)',
+            error: 'Market not closed',
+            message: 'LCP sync runs after 3:30 PM IST (Mon–Fri only)',
             marketClosed: false
         });
     }
-    
+
     try {
         await syncLCP();
-        res.json({ status: 'success', message: '✅ LCP Sync completed successfully', marketClosed: true });
+        res.json({ 
+            status: 'success', 
+            message: '✅ LCP Sync completed successfully',
+            marketClosed: true
+        });
     } catch (error) {
-        res.status(500).json({ status: 'error', message: `❌ LCP Sync failed: ${error.message}` });
+        res.status(500).json({ 
+            status: 'error', 
+            message: `❌ LCP Sync failed: ${error.message}` 
+        });
     }
 });
 

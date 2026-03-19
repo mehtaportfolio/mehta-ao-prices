@@ -24,7 +24,7 @@ async function testServer() {
             console.log(loginRes.data.message);
         }
 
-        const ltp = await axios.get('http://localhost:3000/ltp/BSE/99919000');
+        const ltp = await axios.get('http://localhost:3000/ltp/BSE/544467');
         console.log('LTP Result:', ltp.data);
 
     } catch (error) {
