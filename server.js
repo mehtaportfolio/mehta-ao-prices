@@ -246,7 +246,7 @@ async function syncPrices() {
 
                 const { error } = await supabase
                     .from('stock_mapping')
-                    .upsert(batch, { onConflict: 'symbol_ao,symbol_token,exchange' });
+                    .upsert(batch, { onConflict: 'symbol_ao,exchange' });
 
                 if (error) {
                     console.error(`Batch sync error (CMP):`, error.message);
@@ -323,7 +323,7 @@ async function syncLCP() {
 
                 const { error } = await supabase
                     .from('stock_mapping')
-                    .upsert(batch, { onConflict: 'symbol_ao,symbol_token,exchange' });
+                    .upsert(batch, { onConflict: 'symbol_ao,exchange' });
 
                 if (error) {
                     console.error(`Batch sync error (LCP):`, error.message);
