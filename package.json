@@ -8,6 +8,9 @@
     "search": "node search.js",
     "test": "node test.js"
   },
+  "engines": {
+    "node": "20.x"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -18,7 +21,6 @@
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
-    "fs": "^0.0.1-security",
     "json2csv": "^6.0.0-alpha.2",
     "node-cron": "^4.2.1",
     "otplib": "^13.3.0",
