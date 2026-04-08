@@ -18,7 +18,7 @@ app.use(cors({
 
 const port = process.env.PORT || 4000;
 const MASTER_URL = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json";
-const PORTFOLIO_BACKEND_URL = process.env.PORTFOLIO_BACKEND_URL || "https://backend-bmmt.onrender.com";
+const PORTFOLIO_BACKEND_URL = process.env.PORTFOLIO_BACKEND_URL;
 
 // Supabase Setup
 const supabase = createClient(
