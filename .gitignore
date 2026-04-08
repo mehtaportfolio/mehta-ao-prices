@@ -45,3 +45,4 @@ coverage/
 # Project-specific
 error.log
 angelone_all_eq_stocks.csv
+.env
