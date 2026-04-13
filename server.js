@@ -373,6 +373,39 @@ app.get('/refresh-stocks', async (req, res) => {
     }
 });
 
+async function fetchAngelHoldings() {
+    if (!sessionData) {
+        const loginResult = await login();
+        if (!loginResult.success) return;
+    }
+
+    try {
+        console.log("Fetching holdings...");
+        const response = await smartApi.getHolding();
+
+        if (!response.status) {
+            console.error("API failed:", response);
+            return;
+        }
+
+        const holdings = response.data || [];
+        console.log(`Fetched ${holdings.length} holdings`);
+        // You might want to store these in Supabase too, similar to fetchTodayBuyTrades
+        // For now just logging to satisfy the call
+    } catch (error) {
+        console.error("Error fetching holdings:", error.message);
+    }
+}
+
+app.all(['/fetch-buy-trades'], async (req, res) => {
+    try {
+        await fetchTodayBuyTrades();
+        res.json({ status: 'success', message: '✅ Buy trades aggregated & stored' });
+    } catch (error) {
+        res.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
 // Manual trigger for CMP sync
 app.all(['/sync', '/sync-cmp'], async (req, res) => {
     if (!isMarketOpen()) {
@@ -428,30 +461,114 @@ app.all(['/sync-lcp'], async (req, res) => {
 
 
 
-// Manual trigger for LCP sync
-app.all(['/sync-lcp'], async (req, res) => {
-    const istTime = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-    const hours = istTime.getHours();
-    const minutes = istTime.getMinutes();
-    const currentTime = hours * 60 + minutes;
-    const MARKET_CLOSE = 15 * 60 + 30;
-    
-    if (currentTime < MARKET_CLOSE) {
-        return res.status(400).json({ 
-            error: 'Market still open',
-            message: 'LCP sync runs after market close (3:30 PM IST)',
-            marketClosed: false
-        });
-    }
-    
-    try {
-        await syncLCP();
-        res.json({ status: 'success', message: '✅ LCP Sync completed successfully', marketClosed: true });
-    } catch (error) {
-        res.status(500).json({ status: 'error', message: `❌ LCP Sync failed: ${error.message}` });
-    }
-});
+function aggregateBuyTrades(trades) {
+    const grouped = {};
 
+    trades.forEach(t => {
+        // ✅ ONLY BUY TRADES
+        if (t.transactiontype !== "BUY") return;
+
+        const symbol = t.tradingsymbol || t.tradingSymbol || t.symbol;
+        const exchange = t.exchange || t.exch_seg;
+        const key = `${symbol}_${exchange}`;
+
+        if (!grouped[key]) {
+            grouped[key] = {
+                symbol: symbol,
+                exchange: exchange,
+                isin: t.isin || null,
+                product: t.producttype || t.product,
+
+                totalQty: 0,
+                totalValue: 0
+            };
+        }
+
+        const qty = Number(t.quantity || t.fillsize || t.fillquantity || 0);
+        const price = Number(t.price || t.fillprice || t.averageprice || 0);
+
+        if (!isNaN(qty) && !isNaN(price)) {
+            grouped[key].totalQty += qty;
+            grouped[key].totalValue += qty * price;
+        }
+    });
+
+    // ✅ FINAL FORMAT
+    return Object.values(grouped).map(g => ({
+        broker: "angel",
+        account_id: process.env.CLIENT_ID,
+
+        symbol: g.symbol,
+        isin: g.isin,
+
+        quantity: g.totalQty,
+        average_price: g.totalQty > 0 ? Number((g.totalValue / g.totalQty).toFixed(2)) : 0,
+        last_price: 0, // will replace with CMP later
+        pnl: 0,
+
+        product: g.product,
+        exchange: g.exchange,
+
+        position_date: new Date().toISOString().split("T")[0],
+        fetched_at: new Date().toISOString()
+    }));
+}
+
+async function fetchTodayBuyTrades() {
+    if (!sessionData) {
+        const loginResult = await login();
+        if (!loginResult.success) return;
+    }
+
+    try {
+        console.log("Fetching tradebook...");
+
+        const response = await smartApi.getTradeBook();
+
+        if (!response.status) {
+            console.error("API failed:", response);
+            return;
+        }
+
+        const trades = response.data || [];
+
+        if (trades.length === 0) {
+            console.log("No trades found today");
+            return;
+        }
+
+        console.log("RAW TRADES:", trades);
+
+        // 🔥 AGGREGATION
+        const formatted = aggregateBuyTrades(trades);
+
+        console.log("AGGREGATED BUY TRADES:", formatted);
+
+        const today = new Date().toISOString().split("T")[0];
+
+        // ✅ DELETE TODAY’S OLD DATA (SAFE SNAPSHOT APPROACH)
+        await supabase
+            .from('equity_positions')
+            .delete()
+            .eq('broker', 'angel')
+            .eq('account_id', process.env.CLIENT_ID)
+            .eq('position_date', today);
+
+        // ✅ INSERT CLEAN DATA
+        const { error } = await supabase
+            .from('equity_positions')
+            .insert(formatted);
+
+        if (error) {
+            console.error("Insert error:", error.message);
+        } else {
+            console.log(`✅ Inserted ${formatted.length} aggregated BUY trades`);
+        }
+
+    } catch (error) {
+        console.error("Error:", error.message);
+    }
+}
 
 // LTP Fetching endpoint
 app.get('/ltp/:exchange/:symbolToken', async (req, res) => {
@@ -531,28 +648,20 @@ app.get('/status', (req, res) => {
     });
 });
 
-app.get('/refresh-stocks', async (req, res) => {
-    try {
-        const result = await refreshStocks();
-        res.json({ 
-            status: "success",
-            message: `✅ Stock refresh completed: ${result.count} stocks processed`
-        });
-    } catch (error) {
-        res.status(500).json({
-            status: "error",
-            message: `❌ Stock refresh failed: ${error.message}`
-        });
-    }
-});
-
-
 // Daily session invalidation and re-login at 8:00 AM IST
 cron.schedule('0 8 * * *', async () => {
     console.log('Automated Daily Login at 8:00 AM IST...');
     sessionData = null;
     const result = await login();
     await notifyStatus(result.success, result.success ? 'Daily automated login successful' : `Daily automated login failed: ${result.message}`);
+}, {
+    timezone: "Asia/Kolkata"
+});
+
+// Daily session snapshot after market close
+cron.schedule('35 15 * * *', async () => {
+    console.log('Fetching Angel holdings after market close...');
+    await fetchAngelHoldings();
 }, {
     timezone: "Asia/Kolkata"
 });
