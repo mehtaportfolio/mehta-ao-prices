@@ -179,10 +179,17 @@ async function fetchMarketDataChunked(exchangeTokens) {
                 if (response.status && response.data && response.data.fetched) {
                     allFetchedData.push(...response.data.fetched);
                 } else {
-                    console.error(`API response error for ${exch}:`, response.message || 'Unknown error');
+                    const msg = response.message || 'Unknown error';
+                    console.error(`API response error for ${exch}:`, msg);
+                    if (msg === 'Invalid Token' || msg.includes('Token expired') || response.errorcode === 'AG8001') {
+                        throw new Error(msg);
+                    }
                 }
             } catch (err) {
                 console.error(`Exception fetching chunk for ${exch}:`, err.message);
+                if (err.message === 'Invalid Token' || err.message.includes('Token expired')) {
+                    throw err;
+                }
             }
         }
     }
@@ -253,7 +260,7 @@ async function syncPrices() {
         }
     } catch (error) {
         console.error('Error during price sync:', error.message);
-        if (error.message.includes('Token expired') || error.errorcode === 'AG8001') {
+        if (error.message.includes('Token expired') || error.message === 'Invalid Token' || error.errorcode === 'AG8001') {
             console.log('Session expired during sync. Clearing sessionData.');
             sessionData = null;
         }
@@ -319,6 +326,10 @@ async function syncLCP() {
         }
     } catch (error) {
         console.error('Error during LCP sync:', error.message);
+        if (error.message.includes('Token expired') || error.message === 'Invalid Token' || error.errorcode === 'AG8001') {
+            console.log('Session expired during LCP sync. Clearing sessionData.');
+            sessionData = null;
+        }
     }
 }
 
@@ -367,6 +378,9 @@ async function fetchAngelHoldings() {
 
         if (!response.status) {
             console.error("API failed:", response);
+            if (response.message === 'Invalid Token' || response.message.includes('Token expired') || response.errorcode === 'AG8001') {
+                sessionData = null;
+            }
             return;
         }
 
@@ -482,6 +496,9 @@ async function fetchTodayBuyTrades() {
 
         if (!response.status) {
             console.error("API failed:", response);
+            if (response.message === 'Invalid Token' || response.message.includes('Token expired') || response.errorcode === 'AG8001') {
+                sessionData = null;
+            }
             return;
         }
 
@@ -553,7 +570,7 @@ app.get('/ltp/:exchange/:symbolToken', async (req, res) => {
             });
         } else {
             // Check if token expired
-            if (response.message.includes('Token expired') || response.errorcode === 'AG8001') {
+            if (response.message === 'Invalid Token' || response.message.includes('Token expired') || response.errorcode === 'AG8001') {
                 sessionData = null;
                 return res.status(401).json({ error: 'Session expired. Please re-login with new TOTP.' });
             }
