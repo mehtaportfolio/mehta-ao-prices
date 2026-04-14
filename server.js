@@ -57,42 +57,43 @@ async function refreshStocks() {
 
         console.log("Total instruments:", instruments.length);
 
-        const eqStocks = instruments.filter(item =>
-            (item.exch_seg === "NSE" || item.exch_seg === "BSE") &&
-            item.instrumenttype === "" &&
-            item.token &&
-            item.symbol &&
-            !/\d/.test(item.symbol)
-        );
-
-        console.log("Total EQ Stocks found:", eqStocks.length);
-
-        const { data: existingNSE, error: fetchError } = await supabase
+        // 1. Delete all existing records first
+        console.log("Cleaning stock_symbols table...");
+        const { error: deleteError } = await supabase
             .from('stock_symbols')
-            .select('name')
-            .eq('exchange', 'NSE');
+            .delete()
+            .neq('symbol_token', '99999999'); // More robust delete all
 
-        if (fetchError) throw fetchError;
+        if (deleteError) throw deleteError;
 
-        const nseNames = new Set(existingNSE?.map(s => s.name) || []);
-        console.log(`Found ${nseNames.size} existing NSE stocks`);
-
-        const nseStocks = eqStocks.filter(item => item.exch_seg === "NSE");
-        const nseNamesFromMaster = new Set(nseStocks.map(s => s.name));
-        const allNseNames = new Set([...nseNames, ...nseNamesFromMaster]);
-        
-        const bseStocks = eqStocks.filter(item => 
-            item.exch_seg === "BSE" && !allNseNames.has(item.name)
+        const filtered = instruments.filter(item => 
+            item.exch_seg === "NSE" || item.exch_seg === "BSE"
         );
 
-        console.log(`Processing ${nseStocks.length} NSE stocks and ${bseStocks.length} BSE stocks (duplicates filtered)`);
+        console.log(`Processing all ${filtered.length} NSE and BSE instruments (before deduplication)...`);
 
-        const formatted = [...nseStocks, ...bseStocks].map(item => ({
-            symbol: item.symbol,
-            name: item.name,
-            exchange: item.exch_seg,
-            symbol_token: item.token
-        }));
+        // Use a Map to deduplicate by 'name' as it appears to be the primary key/unique constraint
+        // We prioritize NSE over BSE if duplicates exist for the same name
+        const uniqueMap = new Map();
+        
+        // Sort to process BSE first, then NSE so NSE overwrites BSE in the Map
+        const sortedFiltered = filtered.sort((a, b) => {
+            if (a.exch_seg === "BSE" && b.exch_seg === "NSE") return -1;
+            if (a.exch_seg === "NSE" && b.exch_seg === "BSE") return 1;
+            return 0;
+        });
+
+        sortedFiltered.forEach(item => {
+            uniqueMap.set(item.name, {
+                symbol: item.symbol,
+                name: item.name,
+                exchange: item.exch_seg,
+                symbol_token: item.token
+            });
+        });
+
+        const formatted = Array.from(uniqueMap.values());
+        console.log(`Total unique instruments (by name) to insert: ${formatted.length}`);
 
         const batchSize = 2000;
         const promises = [];
@@ -102,7 +103,7 @@ async function refreshStocks() {
             promises.push(
                 supabase
                     .from('stock_symbols')
-                    .upsert(batch, { onConflict: 'symbol,exchange' })
+                    .insert(batch)
                     .then(({ error }) => {
                         if (error) console.error(`Batch error:`, error.message);
                     })
@@ -196,70 +197,116 @@ async function fetchMarketDataChunked(exchangeTokens) {
     return allFetchedData;
 }
 
-async function syncPrices() {
+async function syncMarketData() {
     if (!sessionData) {
-        console.log('Session missing in syncPrices. Attempting automated login...');
+        console.log('Session missing in syncMarketData. Attempting automated login...');
         if (process.env.TOTP_SECRET) {
             const loginResult = await login();
             if (!loginResult.success) {
-                console.log('Automated login failed in syncPrices. Skipping sync.');
-                await notifyStatus(false, `Automated login failed during syncPrices: ${loginResult.message}`);
+                console.log('Automated login failed in syncMarketData. Skipping sync.');
+                await notifyStatus(false, `Automated login failed during syncMarketData: ${loginResult.message}`);
                 return;
             }
         } else {
             console.log('Skipping sync: Not authenticated and no TOTP_SECRET.');
-            await notifyStatus(false, 'Session missing in syncPrices and no TOTP_SECRET available.');
+            await notifyStatus(false, 'Session missing in syncMarketData and no TOTP_SECRET available.');
             return;
         }
     }
 
     try {
-        console.log('Syncing current market prices (CMP) to Supabase...');
-        const { data: symbols, error: fetchError } = await supabase
+        console.log('--- Starting Market Data Sync (CMP & LCP) ---');
+        
+        // 1. Fetch symbol_ao from stock_mapping (only stocks we traded)
+        const { data: mapping, error: mappingError } = await supabase
             .from('stock_mapping')
-            .select('symbol_ao, exchange, symbol_token');
+            .select('symbol_ao');
 
-        if (fetchError) throw fetchError;
-        if (!symbols || symbols.length === 0) return;
+        if (mappingError) throw mappingError;
+        if (!mapping || mapping.length === 0) {
+            console.log("No stocks found in stock_mapping. Skipping sync.");
+            return;
+        }
 
+        const activeSymbolAOs = mapping.filter(m => m.symbol_ao).map(m => m.symbol_ao);
+        if (activeSymbolAOs.length === 0) {
+            console.log("No valid symbol_ao found in stock_mapping. Skipping sync.");
+            return;
+        }
+
+        console.log(`Syncing prices for ${activeSymbolAOs.length} stocks from stock_mapping.`);
+
+        // 2. Fetch tokens and exchanges from stock_symbols for these symbol_ao names
+        const { data: symbols, error: symbolsError } = await supabase
+            .from('stock_symbols')
+            .select('name, exchange, symbol_token')
+            .in('name', activeSymbolAOs);
+
+        if (symbolsError) throw symbolsError;
+        if (!symbols || symbols.length === 0) {
+            console.log("No matching tokens found in stock_symbols for active mappings.");
+            return;
+        }
+
+        // Build lookup Map and group tokens by exchange
+        const tokenToSymbolAOMap = new Map(); // key: "exchange:token"
         const exchangeTokens = {};
+
         symbols.forEach(s => {
-            if (s.exchange && s.symbol_token) {
+            if (s.exchange && s.symbol_token && s.name) {
+                const key = `${s.exchange}:${s.symbol_token}`;
+                tokenToSymbolAOMap.set(key, s.name);
+
                 if (!exchangeTokens[s.exchange]) exchangeTokens[s.exchange] = [];
                 exchangeTokens[s.exchange].push(s.symbol_token);
             }
         });
 
+        // 3. Fetch Market Data in Chunks
         const fetchedData = await fetchMarketDataChunked(exchangeTokens);
-        console.log(`Fetched ${fetchedData.length} records from API. Expected ~${symbols.length}.`);
+        console.log(`Fetched ${fetchedData.length} records from API (expected ~${symbols.length}).`);
 
-        if (fetchedData.length > 0) {
-            const BATCH_SIZE = 500;
-            const now = new Date().toISOString();
-            
-            for (let i = 0; i < fetchedData.length; i += BATCH_SIZE) {
-                const batch = fetchedData.slice(i, i + BATCH_SIZE).map(stock => ({
-                    symbol_ao: stock.tradingSymbol,
-                    symbol_token: stock.symbolToken,
-                    exchange: stock.exchange,
-                    cmp: stock.ltp,
-                    last_updated: now
-                }));
+        if (fetchedData.length === 0) {
+            console.log("No market data fetched from API.");
+            return;
+        }
 
+        // 4. Update stock_mapping row by row (NEVER USE UPSERT)
+        const istNow = new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' });
+        let updateCount = 0;
+        let skippedCount = 0;
+
+        const updatePromises = fetchedData.map(async (stock) => {
+            const key = `${stock.exchange}:${stock.symbolToken}`;
+            const symbolAO = tokenToSymbolAOMap.get(key);
+
+            if (symbolAO) {
                 const { error } = await supabase
                     .from('stock_mapping')
-                    .upsert(batch, { onConflict: 'symbol_ao,exchange' });
+                    .update({
+                        cmp: stock.ltp,
+                        lcp: stock.close,
+                        last_updated: istNow
+                    })
+                    .eq('symbol_ao', symbolAO);
 
                 if (error) {
-                    console.error(`Batch sync error (CMP):`, error.message);
+                    console.error(`Update failed for ${symbolAO}:`, error.message);
                 } else {
-                    console.log(`Processed CMP batch ${i / BATCH_SIZE + 1}`);
+                    updateCount++;
                 }
+            } else {
+                skippedCount++;
             }
-            console.log(`CMP Sync complete. Updated ${fetchedData.length} symbols.`);
-        }
+        });
+
+        await Promise.all(updatePromises);
+
+        console.log(`Sync Complete: ${updateCount} updated, ${skippedCount} skipped.`);
+        console.log('--- Market Data Sync Finished ---');
+
     } catch (error) {
-        console.error('Error during price sync:', error.message);
+        console.error('Error during market data sync:', error.message);
         if (error.message.includes('Token expired') || error.message === 'Invalid Token' || error.errorcode === 'AG8001') {
             console.log('Session expired during sync. Clearing sessionData.');
             sessionData = null;
@@ -267,71 +314,9 @@ async function syncPrices() {
     }
 }
 
-async function syncLCP() {
-    if (!sessionData) {
-        console.log('Session missing in syncLCP. Attempting automated login...');
-        if (process.env.TOTP_SECRET) {
-            await login();
-        }
-        
-        if (!sessionData) {
-            console.log('Skipping LCP sync: Not authenticated and no session.');
-            return;
-        }
-    }
-
-    try {
-        console.log('Syncing last closing prices (LCP)...');
-        const { data: symbols, error: fetchError } = await supabase
-            .from('stock_mapping')
-            .select('symbol_ao, exchange, symbol_token');
-
-        if (fetchError) throw fetchError;
-        if (!symbols || symbols.length === 0) return;
-
-        const exchangeTokens = {};
-        symbols.forEach(s => {
-            if (s.exchange && s.symbol_token) {
-                if (!exchangeTokens[s.exchange]) exchangeTokens[s.exchange] = [];
-                exchangeTokens[s.exchange].push(s.symbol_token);
-            }
-        });
-
-        const fetchedData = await fetchMarketDataChunked(exchangeTokens);
-
-        if (fetchedData.length > 0) {
-            const BATCH_SIZE = 500;
-            const now = new Date().toISOString();
-            
-            for (let i = 0; i < fetchedData.length; i += BATCH_SIZE) {
-                const batch = fetchedData.slice(i, i + BATCH_SIZE).map(stock => ({
-                    symbol_ao: stock.tradingSymbol,
-                    symbol_token: stock.symbolToken,
-                    exchange: stock.exchange,
-                    lcp: stock.close,
-                    last_updated: now
-                }));
-
-                const { error } = await supabase
-                    .from('stock_mapping')
-                    .upsert(batch, { onConflict: 'symbol_ao,exchange' });
-
-                if (error) {
-                    console.error(`Batch sync error (LCP):`, error.message);
-                } else {
-                    console.log(`Processed LCP batch ${i / BATCH_SIZE + 1}`);
-                }
-            }
-            console.log(`LCP Sync complete. Updated ${fetchedData.length} symbols.`);
-        }
-    } catch (error) {
-        console.error('Error during LCP sync:', error.message);
-        if (error.message.includes('Token expired') || error.message === 'Invalid Token' || error.errorcode === 'AG8001') {
-            console.log('Session expired during LCP sync. Clearing sessionData.');
-            sessionData = null;
-        }
-    }
-}
+// Keep the function signatures for triggers if needed, or point triggers directly to syncMarketData
+async function syncPrices() { return syncMarketData(); }
+async function syncLCP() { return syncMarketData(); }
 
 // Sync current prices (CMP) every 5 minutes (runs anytime)
 cron.schedule('*/5 * * * *', () => {

@@ -13,18 +13,18 @@ async function testServer() {
         console.log('--- Angel One Backend Test ---');
         
         // Check initial status
-        const status = await axios.get('http://localhost:3000/status');
+        const status = await axios.get('http://localhost:4000/status');
         console.log('Initial Status:', status.data);
 
         if (!status.data.authenticated) {
             const totp = await question('Enter TOTP from your mobile app: ');
             
             console.log('\n--- Attempting Login ---');
-            const loginRes = await axios.post('http://localhost:3000/login', { totp });
+            const loginRes = await axios.post('http://localhost:4000/login', { totp });
             console.log(loginRes.data.message);
         }
 
-        const ltp = await axios.get('http://localhost:3000/ltp/BSE/544467');
+        const ltp = await axios.get('http://localhost:4000/ltp/NSE/22739');
         console.log('LTP Result:', ltp.data);
 
     } catch (error) {
